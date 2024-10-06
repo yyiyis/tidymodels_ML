@@ -1,0 +1,313 @@
+---
+title: "Machine learning workflow using tidymodels"
+subtitle: "PART1: BASIC USAGE"
+author: "YYS"
+date: "2024-10-5"
+toc: true
+number-sections: true
+format:
+  html:
+    theme: litera
+---
+
+🌀 Workflow of Machine learning in R with package `tidymodels`
+
+-   Strength of `tidymodels`
+
+-   Basic usage
+
+-   For workflow or iteration
+
+------------------------------------------------------------------------
+
+`tidymodels`, like `tidyverse`, have the same good character: "tidy"
+
+> Good system can help build well ideas and acclerate our work.
+
+As we all know, there exist lots of machine learning methods or packages in R, FROM different authors. So huge different usage due to so many parameters in each function.
+
+Fortunately, `tidymodels` union these packages!
+
+Not only use it for machine learning, but also in prepare data (including split data set into training and test, impute missing values, one-hot coding, normalize...etc.)
+
+------------------------------------------------------------------------
+
+```{r setup}
+#| include: false
+knitr::opts_chunk$set(warning = F, message = F, dpi = 300)
+```
+
+```{r}
+#| include: false
+rm(list = ls())
+```
+
+------------------------------------------------------------------------
+
+# load packages and data
+
+The first thing, load packages needed.
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(palmerpenguins)
+library(ggsci)
+```
+
+# basic usage
+
+Here, we will use two examples to show how to do machine learning with tidymodels.
+
+There are two kind of problems we will meet: **classification** and **regression**
+
+> The model choice, depend on our interesting outcome (continous, category, or counting data).
+
+------------------------------------------------------------------------
+
+The first example, is the most used for classification question.
+
+Let us using data named `penguins` fromo packages `palmerpenguins`, we want to predict `sex`(male and female) of each penguin.
+
+```{r}
+penguins |> glimpse()
+```
+
+Some EDA (explore data analysis) is necessary and interesting before we modelling.
+
+```{r}
+penguins |> count(sex)
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 4
+penguins |> 
+  filter(!is.na(sex)) |> 
+  ggplot(aes(flipper_length_mm, bill_length_mm, 
+             color = sex, size = body_mass_g)) +
+  geom_point(alpha = 0.7) +
+  facet_wrap( ~ species)
+```
+
+There exist NA, so we drop them, and other 2 variables. `penguins_df` is the data we will use.
+
+```{r}
+penguins_df <- penguins |> 
+  filter(!is.na(sex)) |> 
+  select(-island) |> 
+  rename(outcome = sex)
+```
+
+## modeling
+
+1.  data split, the first step
+
+-   Generally, we will divide a full dataset into two parts: training and testing set
+
+-   then, in the training set, we will divide it again, using `bootstraps` or `cross-validation`, for model evaluate and high-parameter selection
+
+    -   we can use `bootstraps` for resample with replacement or
+
+    -   use `vfold_cv` for cross-validation
+
+    -   FOR more detail of bootstraps and cross-validation, just `Google` them!
+
+```{r}
+set.seed(123)
+df_split <- initial_split(penguins_df, strata = outcome)
+df_train <- training(df_split)
+df_test <- testing(df_split) 
+
+set.seed(234)
+df_folds_bs <- bootstraps(df_train, strata = outcome)
+ 
+
+set.seed(345)
+df_folds_cv <- vfold_cv(df_train, strata = outcome)
+```
+
+2.  build recipe
+
+we can build formula in our model, and then some prepare such as imputing, dummy coding......
+
+for more information, Google `step_ with recipe`
+
+```{r}
+df_recipe <- 
+  recipe(formula = outcome ~ ., data = df_train) # |> 
+  # step_impute_median(variable_1, variable_2, ...)|> 
+  # step_dummy(variable_3, variable_4, ...)
+```
+
+3.  modelling
+
+we use two model here: logistic and random forest.
+
+we set engine such as `glm` and `ranger`, meanwhile, we add `importance = "impurity"` for further variable importance computation;
+
+Then we add recipe above and model with engine, link them use `workflow()`;
+
+next step, we bootstraps the model in training set, to see the performance.
+
+```{r}
+glm_spec <- logistic_reg() |> 
+  set_engine("glm")
+
+glm_wf <- workflow() |> 
+  add_recipe(df_recipe) |> 
+  add_model(glm_spec)
+
+glm_rs <- glm_wf |> 
+  fit_resamples(
+    resamples = df_folds_bs,
+    control = control_resamples(save_pred = T, verbose = T)
+  )
+glm_rs
+```
+
+```{r}
+rf_spec <- rand_forest() |> 
+  set_mode("classification") |> 
+  set_engine("ranger", importance = "impurity")
+
+rf_wf <- workflow() |> 
+  add_recipe(df_recipe) |> 
+  add_model(rf_spec)
+
+rf_rs <- rf_wf |> 
+  fit_resamples(
+    resamples = df_folds_bs,
+    control = control_resamples(save_pred = T, verbose = T)
+  )
+rf_rs
+```
+
+Now, we will find a tidy PHENOMENON, the logistic and random forest model are extremely same!
+
+## evaluate
+
+Next, we want to know how the performance of our model.
+
+some metrics like: accuracy, roc_auc, sens, spec, recall, f_meas......
+
+🌐[Metric types in yardstick](https://yardstick.tidymodels.org/articles/metric-types.html)
+
+we can add more metrics into `fit_resamples` through `metrics = metric_set()`
+
+### basic metrics
+
+```{r}
+collect_metrics(glm_rs)
+```
+
+also for `rf_rs`
+
+```{r}
+collect_metrics(rf_rs)
+```
+
+### confusion matrix
+
+```{r}
+glm_rs |> 
+  conf_mat_resampled()
+```
+
+### ROC
+
+```{r}
+glm_rs |> 
+  collect_predictions() |> 
+  group_by(id) |> 
+  roc_curve(outcome, .pred_female) |>   # 后面也可以直接 autoplot()
+  ggplot(aes(1 - specificity, sensitivity, color = id)) +
+  geom_abline(lty = 2, color = "gray80", size = 1.5) +
+  geom_path(show.legend = F, alpha = 0.6, size = 1.2) +
+  coord_equal()
+```
+
+## in test final model
+
+```{r}
+glm_final <- glm_wf |> 
+  last_fit(df_split)
+glm_final
+```
+
+```{r}
+rf_final <- rf_wf |> 
+  last_fit(df_split)
+rf_final
+```
+
+### metric in test
+
+```{r}
+collect_metrics(glm_final)
+```
+
+```{r}
+collect_metrics(rf_final)
+```
+
+### pred probility
+
+```{r}
+collect_predictions(glm_final) |> 
+  arrange(.pred_female) |> 
+  head(10)
+```
+
+### ROC in test
+
+```{r}
+rbind(
+  collect_predictions(glm_final) |>
+    roc_curve(outcome, .pred_female) |>
+    mutate(Model = "Logistic (AUC = 0.938)")
+  ,
+  collect_predictions(rf_final) |>
+    roc_curve(outcome, .pred_female) |>
+    mutate(Model = "Random forest (AUC = 0.933)")
+) |>
+  mutate(Model = fct_relevel(Model,
+                             "Logistic (AUC = 0.938)",
+                             "Random forest (AUC = 0.933)",
+                             )) |> 
+  ggplot(aes(x = 1 - specificity, y = sensitivity)) +
+  geom_abline(lty = 2,
+              color = "gray80",
+              linewidth = 1.5) +
+  geom_path(aes(color = Model), alpha = 0.8, linewidth = 1) +
+  labs(x = "1 - Specificity", y = "Sensitivity") +
+  coord_equal() +
+  scale_color_lancet() +
+  theme_classic() +
+  theme(legend.position = c(0.75, 0.25))
+```
+
+### conf mat
+
+```{r}
+collect_predictions(glm_final) |> 
+  conf_mat(outcome, .pred_class)
+```
+
+### estimate coef
+
+```{r}
+glm_final$.workflow[[1]] |> 
+  tidy(exponetiate = T) |> 
+  arrange(estimate)
+```
+
+------------------------------------------------------------------------
+
+This is the first part of `tidymodels`;
+
+🔜In next part, we will introduce how to select high-parameters
+
+------------------------------------------------------------------------
+
+😃Thank you to Julia Silge, an exceptionally talented data scientist. I have greatly enhanced my understanding of `tidymodels` through her informative YouTube channel.
